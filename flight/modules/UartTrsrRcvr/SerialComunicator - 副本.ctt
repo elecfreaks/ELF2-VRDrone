@@ -1,0 +1,145 @@
+/**
+ ******************************************************************************
+ * @brief SerialComunicator test
+ *
+ * @file       SerialComunicator.c
+ * @author     Richile.
+ * @brief      SerialComunicator test
+ *
+ *****************************************************************************/
+
+#include "SerialComunicator.h"
+#include "UartTrsrRcvr.h"
+#include "pios_mem.h"
+
+static unsigned char inBuf[INBUF_SIZE];
+static unsigned char indRX;
+static unsigned char recvBuf[RECV_BUFFER_LENGTH];
+static unsigned char sendBuf[SEND_BUFFER_LENGTH];
+static int recOffset;
+
+void processData(const unsigned char *pData, int16_t len)
+{
+	/*Serial.printf("processData:");
+	for (int i=0; i<len; i++){
+		Serial.printf("%02X ", pData[i]);
+	}
+	Serial.printf("\n");*/
+	unsigned char checkSum = 0;
+	unsigned char realLen = pData[3];
+	unsigned char cmd = pData[4];
+
+	checkSum ^= realLen;
+	checkSum ^= cmd;
+
+	int i=0;		
+	for(i=0; i<realLen; i++){
+		inBuf[i] = pData[5+i];
+		checkSum ^= pData[5+i];
+	}
+	if(pData[5+i] == checkSum && ((len-6) == realLen)){
+		indRX = 0;
+		OnEvaluateCommand(cmd);
+	}
+}
+
+void recievedData(const unsigned char *pData, int32_t len)
+{
+	/*Serial.printf("recievedData:");
+	for (int i=0; i<len; i++){
+		Serial.printf("%02X ", pData[i]);
+	}
+	Serial.printf("\n");*/
+	if(len > 3 && pData[0] == 0x24 && pData[1] == 0x4D && pData[2] == 0x3C){
+		memcpy(recvBuf, pData, len);
+		if((len-6) < pData[3]){			// example:24 4D 3C 05 22 01 02 03
+			recOffset = len;
+		}else if((len-6) == pData[3]){	// example:24 4D 3C 05 22 01 02 03 04 05 checksum
+			processData(recvBuf, len);
+			recOffset = 0;
+		}else{							// example:24 4D 3C 05 22 01 02 03 04 05 checksum 24 4D
+			processData(recvBuf, pData[3]+6);
+			recOffset = 0;
+			recievedData(recvBuf+pData[3]+6, len-pData[3]-6);
+		}
+	}else{								// example:24 4D  or 07 01 12 03  or (24 4D 3C)...07 01 12 03 24 4D 3C
+		if((recOffset + len) > RECV_BUFFER_LENGTH) recOffset = 0;
+		memcpy(recvBuf+recOffset, pData, len);
+		recOffset += len;
+		if(recOffset > 3 && recvBuf[0] == 0x24 && recvBuf[1] == 0x4D && recvBuf[2] == 0x3C && (recOffset-6) >= recvBuf[3]){
+			if((recOffset-6) == recvBuf[3]){
+				processData(recvBuf, recOffset);
+				recOffset = 0;
+			}else if((recOffset-6) > recvBuf[3]){
+				processData(recvBuf, recvBuf[3]+6);
+				int surplusLen = recOffset-6-recvBuf[3];
+				recOffset = 0;
+				recievedData(recvBuf+recvBuf[3]+6, surplusLen);
+			}
+		}
+		// example 07 01 12 03 24 4D 3C 22 D5 ..
+		if(recOffset > 2 && recvBuf[0] != 0x24 && recvBuf[1] != 0x4D && recvBuf[2] != 0x3C){
+			int offset = -1;
+			for(int i=0; i<recOffset; i++){
+				if((i+2)<recOffset && recvBuf[0+i] == 0x24 && recvBuf[1+i] == 0x4D && recvBuf[2+i] == 0x3C){
+					offset = i;
+					break;
+				}
+			}
+			if(offset > 0){
+				memcpy(recvBuf, recvBuf+offset, recOffset-offset);
+				recOffset -= offset;
+			}
+		}
+	}
+}
+
+uint32_t read32() {
+	uint32_t t = read16();
+	t+= (uint32_t)read16()<<16;
+	return t;
+}
+uint16_t read16() {
+	uint16_t t = read8();
+	t+= (uint16_t)read8()<<8;
+	return t;
+}
+uint8_t read8()  {
+	return inBuf[indRX++]&0xff;
+}
+
+void sendCommand(unsigned char cmd)
+{
+	unsigned char *dataPackage = sendBuf;
+	dataPackage[0] = '$';
+	dataPackage[1] = 'M';
+	dataPackage[2] = '>';
+	dataPackage[3] = 0;
+	dataPackage[4] = cmd;
+	dataPackage[5] = cmd;
+	
+	Write(dataPackage, 6);
+}
+
+void sendData(unsigned char cmd, unsigned char *dat, int16_t len)
+{
+	unsigned char *dataPackage = sendBuf;
+	dataPackage[0] = '$';
+	dataPackage[1] = 'M';
+	dataPackage[2] = '>';
+	dataPackage[3] = (unsigned char)len;
+	dataPackage[4] = cmd;
+	unsigned char checkSum = 0;
+	int16_t i=0;
+	checkSum ^= dataPackage[3];
+	checkSum ^= dataPackage[4];
+	for(i=0; i<len; i++){
+		dataPackage[5+i] = dat[i];
+		checkSum ^= dat[i];
+	}
+	dataPackage[5+i] = checkSum;
+	Write(dataPackage, len+6);
+}
+
+
+
